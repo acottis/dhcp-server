@@ -1,13 +1,24 @@
 use std::net::UdpSocket;
 
 /// DHCP Magic number to signal this is a DHCP packet
-static DHCP_MAGIC: [u8; 4] = [99, 130, 83, 99];
+const DHCP_MAGIC: [u8; 4] = [99, 130, 83, 99];
+/// The IP we bind to
+const BIND_ADDR: &str = "0.0.0.0:67";
+/// The size we give our empty buffers by default, code should truncate to correct size
+const BUFFER_SIZE: usize = 1500; 
+/// Our advertised IP Address in Packets (TODO: Fix this?)
+const SERVER_IP: [u8; 4] = [192, 168 ,1 ,67];
+/// Addresses Offered
+const LEASE_POOL: [[u8; 4]; 1] = [
+    [192, 168, 1, 101]
+];
 
 fn main(){
  
-    let socket = UdpSocket::bind("0.0.0.0:67").unwrap();
+    let socket = UdpSocket::bind(BIND_ADDR).expect("Cannot bind");
+    socket.set_broadcast(true).expect("Cannot set broadcast");
 
-    let mut buf = [0; 1500];
+    let mut buf = [0; BUFFER_SIZE];
 
     loop {
         let (len, src) = socket.recv_from(&mut buf).unwrap();
@@ -16,9 +27,26 @@ fn main(){
         let dhcp = DHCP::parse(&buf, len);
         println!("Cycles: {}", unsafe{ core::arch::x86_64::_rdtsc() } - now);
         println!("{dhcp:?}");
+
+        match dhcp {
+            Some(dhcp) => {
+                if dhcp.op == 1 {
+                    // Lets acknowledge
+                    let mut buf = [0u8; BUFFER_SIZE];
+                    let len = dhcp.ack(&mut buf);
+                    socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
+                }else{
+                    println!("Not sure what to do with this DHCP packet");
+                }
+            },
+            // No DHCP found, ignoring
+            None => {},
+        }
     }    
 }
 
+/// This struct holds all the state of a DHCP packet
+/// 
 #[allow(dead_code)]
 #[derive(Debug)]
 struct DHCP<'a>{
@@ -41,13 +69,13 @@ struct DHCP<'a>{
 }
 
 impl<'a> DHCP<'a>{
-    fn parse(payload: &'a [u8; 1500], len: usize) -> Option<Self> {
-        
+    /// Read an incoming packet and parse out DHCP information if it is a DHCP packet
+    /// 
+    fn parse(payload: &'a [u8; BUFFER_SIZE], len: usize) -> Option<Self> {
         // Not a valid DHCP request
         if len < 240 {
             return None
         }
-
         let mut xid: [u8; 4] = [0; 4];
         let mut secs: [u8; 2] = [0; 2];
         let mut flags: [u8; 2] = [0; 2];
@@ -185,6 +213,43 @@ impl<'a> DHCP<'a>{
             magic,
             options,
         })
+    }
+
+    /// Creates an ACK response based on a DHCP Request
+    fn ack(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
+        buf[0] = 0x2; // op
+        buf[1] = 0x1; // hytpe
+        buf[2] = 0x6; // hlen
+        buf[3] = 0x0; // hops
+        buf[4..8].copy_from_slice(&self.xid); // Client ID
+        buf[8..10].copy_from_slice(&[0u8; 2]); // Seconds
+        buf[10..12].copy_from_slice(&[0u8; 2]); // Bootp flags
+        buf[12..16].copy_from_slice(&[0u8; 4]); // Client IP
+        buf[16..20].copy_from_slice(&LEASE_POOL[0]); // Requested IP
+        buf[20..24].copy_from_slice(&SERVER_IP); // Our Server IP
+        buf[24..28].copy_from_slice(&[0,0,0,0]);
+        buf[28..44].copy_from_slice(&self.chaddr); // Requester MAC
+        buf[44..108].copy_from_slice(&[0u8; 64]); // Unused
+        buf[108..236].copy_from_slice(&[0u8; 128]); // Unused
+        buf[236..240].copy_from_slice(&DHCP_MAGIC); // DHCP Magic bytes
+
+        let options: [&[u8]; 5] = [
+            &[53, 1, 5], // 
+            &[54, 4, 192, 168, 1, 67], // Address given
+            &[51, 4, 0x00, 0x01, 0x51, 0x80], // Lease Time
+            &[1, 4, 255, 255, 255, 0],
+            &[255],
+        ];
+
+        let mut option_ptr = 240;
+        // Generate Options
+        for option in options{
+            let opt_len = option.len();
+            buf[option_ptr .. option_ptr + opt_len].copy_from_slice(option);
+            option_ptr = option_ptr + opt_len;
+        }
+
+        option_ptr
     }
 }
 
