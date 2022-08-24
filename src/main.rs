@@ -26,18 +26,35 @@ fn main(){
         let now = unsafe { core::arch::x86_64::_rdtsc()}; 
         let dhcp = DHCP::parse(&buf, len);
         println!("Cycles: {}", unsafe{ core::arch::x86_64::_rdtsc() } - now);
-        println!("{dhcp:?}");
-
+        
         match dhcp {
             Some(dhcp) => {
-                if dhcp.op == 1 {
-                    // Lets acknowledge
-                    let mut buf = [0u8; BUFFER_SIZE];
-                    let len = dhcp.ack(&mut buf);
-                    socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
-                }else{
-                    println!("Not sure what to do with this DHCP packet");
+                if dhcp.op != 1 {
+                    println!("DHCP OP is not 1, ignoring");
+                    continue
                 }
+                let mut buf = [0u8; BUFFER_SIZE];
+                match dhcp.msg_type {
+                    // If request -> Lets acknowledge
+                    Some(MessageType::Request) => {
+                        let len = dhcp.ack(&mut buf);
+                        socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
+                    }
+                    // If Discover -> Do Something
+                    Some(MessageType::Discover) => {
+                        println!("Found DHCP Discover");
+                        println!("{dhcp:?}");
+                        let len = dhcp.offer(&mut buf);
+                        socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
+                    }
+                    // If Inform -> Do Something
+                    Some(MessageType::Inform) => {
+                        todo!("Not implemented inform yet");
+                    }
+                    _ => {todo!("We dont handle this yet")}
+                };
+
+
             },
             // No DHCP found, ignoring
             None => {},
@@ -65,7 +82,8 @@ struct DHCP<'a>{
     sname: [u8; 64],
     file: [u8; 128],
     magic: [u8; 4],
-    options: [Option<DhcpOption<'a>>; 10],
+    msg_type: Option<MessageType>,
+    options: [Option<DhcpOption<'a>>; 20],
 }
 
 impl<'a> DHCP<'a>{
@@ -87,6 +105,7 @@ impl<'a> DHCP<'a>{
         let mut sname: [u8; 64] = [0; 64];
         let mut file: [u8; 128] = [0; 128];
         let mut magic: [u8; 4] = [0; 4];
+        let mut msg_type = None;
 
         let op = payload[0];
         let htype = payload[1];
@@ -108,7 +127,7 @@ impl<'a> DHCP<'a>{
         if magic != DHCP_MAGIC { return None }
 
         let mut options_counter = 0;
-        let mut options: [Option<DhcpOption>; 10] = [None; 10];
+        let mut options: [Option<DhcpOption>; 20] = [None; 20];
         let mut options_ptr = 240;
         loop {
             if options_ptr >= len { break }
@@ -138,9 +157,10 @@ impl<'a> DHCP<'a>{
                 },
                 // DHCP Message Type
                 53 => { 
-                    if let Some(msg_type) = payload[options_ptr+2].try_into().ok(){
+                    if let Some(m_type) = payload[options_ptr+2].try_into().ok(){
+                        msg_type = Some(m_type);
                         (
-                            Some(DhcpOption::MessageType(msg_type)),
+                            Some(DhcpOption::MessageType(m_type)),
                             payload[options_ptr+1] as usize
                         )
                     }else{
@@ -211,10 +231,10 @@ impl<'a> DHCP<'a>{
             sname,
             file,
             magic,
+            msg_type,
             options,
         })
     }
-
     /// Creates an ACK response based on a DHCP Request
     fn ack(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
         buf[0] = 0x2; // op
@@ -237,8 +257,44 @@ impl<'a> DHCP<'a>{
             &[53, 1, 5], // 
             &[54, 4, 192, 168, 1, 67], // Address given
             &[51, 4, 0x00, 0x01, 0x51, 0x80], // Lease Time
-            &[1, 4, 255, 255, 255, 0],
-            &[255],
+            &[1, 4, 255, 255, 255, 0], // Subnet Mask
+            &[255], // End
+        ];
+
+        let mut option_ptr = 240;
+        // Generate Options
+        for option in options{
+            let opt_len = option.len();
+            buf[option_ptr .. option_ptr + opt_len].copy_from_slice(option);
+            option_ptr = option_ptr + opt_len;
+        }
+
+        option_ptr
+    }
+    /// Creates an Offer response based on a DHCP Discover
+    fn offer(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
+        buf[0] = 0x2; // op
+        buf[1] = 0x1; // hytpe
+        buf[2] = 0x6; // hlen
+        buf[3] = 0x0; // hops
+        buf[4..8].copy_from_slice(&self.xid); // Client ID
+        buf[8..10].copy_from_slice(&[0u8; 2]); // Seconds
+        buf[10..12].copy_from_slice(&[0u8; 2]); // Bootp flags
+        buf[12..16].copy_from_slice(&[0u8; 4]); // Client IP
+        buf[16..20].copy_from_slice(&LEASE_POOL[0]); // Yiaddr
+        buf[20..24].copy_from_slice(&[0u8; 4]); // Our Server IP
+        buf[24..28].copy_from_slice(&[0u8; 4]); // Relay IP
+        buf[28..44].copy_from_slice(&self.chaddr); // Requester MAC
+        buf[44..108].copy_from_slice(&[0u8; 64]); // Unused
+        buf[108..236].copy_from_slice(&[0u8; 128]); // Unused
+        buf[236..240].copy_from_slice(&DHCP_MAGIC); // DHCP Magic bytes
+
+        let options: [&[u8]; 5] = [
+            &[53, 1, 2], // 
+            &[54, 4, 192, 168, 1, 67], // Address given
+            &[51, 4, 0x00, 0x01, 0x51, 0x80], // Lease Time
+            &[1, 4, 255, 255, 255, 0], // Subnet Mask
+            &[255], // End
         ];
 
         let mut option_ptr = 240;
@@ -268,9 +324,9 @@ enum MessageType {
     Discover    = 1,
     Offer       = 2,
     Request     = 3,
-    Ack         = 4,
-    Nak         = 5,
-    Decline     = 6,
+    Decline     = 4,
+    Ack         = 5,
+    Nak         = 6,
     Release     = 7,
     Inform      = 8,
 }
@@ -295,11 +351,3 @@ impl TryFrom<u8> for MessageType {
         }
     }
 }
-
-// #[macro_export]
-// macro_rules! consume {
-//     (&$buf:expr, $typ:ty) => {{
-//         println!("{}", core::mem::size_of::<$typ>());
-//         [0u8; 1]
-//     }}
-// }
