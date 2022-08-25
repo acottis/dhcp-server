@@ -64,7 +64,11 @@ pub enum Options<'a> {
     MaxDhcpMessageSize(u16),
     ClientIdentifier(u8, [u8; 6]),
     TftpServer(&'a str), 
-    BootFile(&'a str), 
+    BootFile(&'a str),
+    ClientSystemArch(u16),
+    ClientNetInterfaceIdent((u8,u8)),
+    ClientMachineIdent(u8),
+    TftpServerIP([u8; 4]),
     End,
 }
 
@@ -82,6 +86,10 @@ impl Options<'_>{
             Self::ClientIdentifier(_, _) => 61,
             Self::TftpServer(_) => 66,      
             Self::BootFile(_) => 67,      
+            Self::ClientSystemArch(_) => 93,   
+            Self::ClientNetInterfaceIdent(_) => 94,   
+            Self::ClientMachineIdent(_) => 97,  
+            Self::TftpServerIP(_) => 150,   
             Self::End => 255,
         }
     }
@@ -136,6 +144,33 @@ impl Serialise for Options<'_>{
             Self::MaxDhcpMessageSize(e) => {0},
             Self::RequestedIPAddr(e) => {0},
             Self::HostName(e) => {0},
+            Self::ClientSystemArch(num) => {
+                let len: usize = 4;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2] = (num << 8) as u8;
+                tmp_buf[3] = *num as u8;
+                len
+            },
+            Self::ClientNetInterfaceIdent((major, minor)) => {
+                let len: usize = 5;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2] = 1;
+                tmp_buf[3] = *major;
+                tmp_buf[4] = *minor;
+                len
+            },
+            Self::ClientMachineIdent(num) => {
+                let len: usize = 19;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2] = *num;
+                len
+            },
+            Self::TftpServerIP(addr) => {
+                let len: usize = 6;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2..6].copy_from_slice(addr);
+                len
+            },
             Self::End => { 1 },
         }
     }

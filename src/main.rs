@@ -5,7 +5,7 @@ use types::*;
 
 /// DHCP Magic number to signal this is a DHCP packet
 const DHCP_MAGIC: [u8; 4] = [99, 130, 83, 99];
-/// The IP we bind to
+/// The IP and port we bind to
 const BIND_ADDR: &str = "192.168.10.1:67";
 /// The size we give our empty buffers by default, code should truncate to correct size
 const BUFFER_SIZE: usize = 1500; 
@@ -16,7 +16,7 @@ const SUBNET_MASK: [u8; 4] = [255, 255, 255, 0];
 /// TFTP Server
 const TFTP_ADDR: &str = "192.168.10.1";
 /// TFTP Boot file
-const TFTP_BOOT_FILE: &str = "stage0.flat";
+const TFTP_BOOT_FILE: &str = "stage0.bin";
 /// Addresses Offered
 const LEASE_TIME: u32 = 86400;
 /// Addresses Offered
@@ -32,9 +32,9 @@ fn main(){
     let socket = UdpSocket::bind(BIND_ADDR).expect("Cannot bind");
     socket.set_broadcast(true).expect("Cannot set broadcast");
 
-    let mut buf = [0; BUFFER_SIZE];
-
     loop {
+        let mut buf = [0; BUFFER_SIZE];
+
         let (len, src) = socket.recv_from(&mut buf).unwrap();
         println!("Received {len} byte(s) from {src:?}");
         let now = unsafe { core::arch::x86_64::_rdtsc()}; 
@@ -52,12 +52,13 @@ fn main(){
                 Some(MessageType::Request) => {
                     let len = dhcp.ack(&mut buf);
                     socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
+                    println!("Found Request, Sending DHCP ack");
                 }
                 // If Discover -> Do Something
                 Some(MessageType::Discover) => {
-                    println!("Found DHCP Discover");
                     let len = dhcp.offer(&mut buf);
                     socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
+                    println!("Found Discover, Sending DHCP offer");
                 }
                 // If Inform -> Do Something
                 Some(MessageType::Inform) => {
@@ -208,6 +209,8 @@ impl<'a> DHCP<'a>{
     
                     Some(Options::ClientIdentifier(hardware_type, client_mac))
                 },
+                // User Class Information, dont need https://www.rfc-editor.org/rfc/rfc3004
+                77 => { None }
                 // Client System Arch (For PXE)
                 93 => {
                     // Client ID is 16 bytes out of 17 of length
@@ -232,6 +235,8 @@ impl<'a> DHCP<'a>{
                     pxe_config.client_id.copy_from_slice(&payload[options_ptr+2..options_ptr+2+len-1]);
                     None
                 }
+                // Etherchannel, dont need this?
+                175 => { None }
                 unknown => { 
                     println!("We do not handle option {unknown}");
                     None
@@ -272,15 +277,19 @@ impl<'a> DHCP<'a>{
     fn ack(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
 
         // Set the basic defaults
-        self.baseline(buf);
+        self.new(buf);
 
         let options: &[Options] = &[
             Options::MessageType(MessageType::Ack),
-            Options::ServerIP(SERVER_IP),
             Options::SubnetMask(SUBNET_MASK),
             Options::LeaseTime(LEASE_TIME), // 1 day
+            Options::ServerIP(SERVER_IP),
             Options::TftpServer(TFTP_ADDR),
             Options::BootFile(TFTP_BOOT_FILE),
+            // Options::ClientSystemArch(0),
+            // Options::ClientNetInterfaceIdent((2,1)),
+            // Options::ClientMachineIdent(0),
+            //Options::TftpServerIP(SERVER_IP),
             Options::End,
         ];
 
@@ -304,32 +313,15 @@ impl<'a> DHCP<'a>{
     fn offer(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
 
         // Set the basic defaults
-        self.baseline(buf);
+        self.new(buf);
         
-        let options: &[Options] = if self.pxe_config.arch == ClientArch::Unknown {
-            &[
-                Options::MessageType(MessageType::Offer),
-                Options::ServerIP(SERVER_IP),
-                Options::SubnetMask(SUBNET_MASK),
-                Options::LeaseTime(LEASE_TIME), // 1 day
-                Options::TftpServer(TFTP_ADDR),
-                Options::BootFile(TFTP_BOOT_FILE),
-                Options::End,
-            ]
-        }else{
-            &[
-                Options::MessageType(MessageType::Offer),
-                Options::ServerIP(SERVER_IP),
-                Options::SubnetMask(SUBNET_MASK),
-                Options::LeaseTime(LEASE_TIME), // 1 day
-                Options::TftpServer(TFTP_ADDR),
-                Options::BootFile(TFTP_BOOT_FILE),
-                Options::End,
-                // &[93, 2, 0, 0], // PXE Client Arch
-                // &[94, 3, 1, 2, 1], // PXE Version
-                // &[97, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // PXE Guid
-            ]
-        };
+        let options: &[Options] = &[
+            Options::MessageType(MessageType::Offer),
+            Options::SubnetMask(SUBNET_MASK),
+            Options::LeaseTime(LEASE_TIME),
+            Options::ServerIP(SERVER_IP),
+            Options::End,
+        ];
 
         // Start at 240 (After the magic bytes)
         let mut option_ptr = 240;
@@ -364,7 +356,7 @@ impl<'a> DHCP<'a>{
         None
     }
 
-    fn baseline(&self, buf: &mut [u8; BUFFER_SIZE]) {
+    fn new(&self, buf: &mut [u8; BUFFER_SIZE]) {
         let ip_offered = self.get_addr_from_pool().expect("No available IPs");
 
         buf[0] = 0x2; // op
@@ -376,7 +368,7 @@ impl<'a> DHCP<'a>{
         buf[10..12].copy_from_slice(&[0u8; 2]); // Bootp flags
         buf[12..16].copy_from_slice(&[0u8; 4]); // Client IP
         buf[16..20].copy_from_slice(&ip_offered); // Yiaddr
-        buf[20..24].copy_from_slice(&[0u8; 4]); // Our Server IP
+        buf[20..24].copy_from_slice(&SERVER_IP); // Our Server IP
         buf[24..28].copy_from_slice(&[0u8; 4]); // Relay IP
         buf[28..34].copy_from_slice(&self.chaddr); // Requester MAC
         buf[44..108].copy_from_slice(&[0u8; 64]); // Unused
