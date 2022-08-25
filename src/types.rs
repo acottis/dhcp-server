@@ -55,15 +55,16 @@ impl From<u16> for ClientArch{
 #[derive(Clone, Copy, Debug)]
 pub enum Options<'a> {
     SubnetMask([u8; 4]),
+    HostName(&'a str),
+    RequestedIPAddr([u8; 4]),
     LeaseTime(u32),       
     MessageType(MessageType), 
     ServerIP([u8;4]),     
-    TftpServer(&'a str), 
-    ClientIdentifier(u8, [u8; 6]),
     ParameterRequestList([u8; 50]),
     MaxDhcpMessageSize(u16),
-    RequestedIPAddr([u8; 4]),
-    HostName(&'a str),
+    ClientIdentifier(u8, [u8; 6]),
+    TftpServer(&'a str), 
+    BootFile(&'a str), 
     End,
 }
 
@@ -80,6 +81,7 @@ impl Options<'_>{
             Self::MaxDhcpMessageSize(_) => 57,
             Self::ClientIdentifier(_, _) => 61,
             Self::TftpServer(_) => 66,      
+            Self::BootFile(_) => 67,      
             Self::End => 255,
         }
     }
@@ -106,6 +108,12 @@ impl Serialise for Options<'_>{
                 let len: usize = addr.len() + 2;
                 tmp_buf[1] = addr.len() as u8;
                 tmp_buf[2..2+addr.len()].copy_from_slice(addr.as_bytes());
+                len
+            },
+            Self::BootFile(file_path) => {
+                let len: usize = file_path.len() + 2;
+                tmp_buf[1] = file_path.len() as u8;
+                tmp_buf[2..2+file_path.len()].copy_from_slice(file_path.as_bytes());
                 len
             },
             Self::LeaseTime(time) => {

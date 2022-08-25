@@ -6,16 +6,25 @@ use types::*;
 /// DHCP Magic number to signal this is a DHCP packet
 const DHCP_MAGIC: [u8; 4] = [99, 130, 83, 99];
 /// The IP we bind to
-const BIND_ADDR: &str = "0.0.0.0:67";
+const BIND_ADDR: &str = "192.168.10.1:67";
 /// The size we give our empty buffers by default, code should truncate to correct size
 const BUFFER_SIZE: usize = 1500; 
-/// Our advertised IP Address in Packets (TODO: Fix this?)
-const SERVER_IP: [u8; 4] = [192, 168 ,1 ,67];
+/// Our advertised IP Address in Packets
+const SERVER_IP: [u8; 4] = [192, 168, 10, 1];
+/// Our advertised IP Address in Packets
+const SUBNET_MASK: [u8; 4] = [255, 255, 255, 0];
 /// TFTP Server
-const TFTP_ADDR: &str = "192.168.1.67";
+const TFTP_ADDR: &str = "192.168.10.1";
+/// TFTP Boot file
+const TFTP_BOOT_FILE: &str = "stage0.flat";
 /// Addresses Offered
-const LEASE_POOL: [[u8; 4]; 1] = [
-    [192, 168, 1, 101]
+const LEASE_TIME: u32 = 86400;
+/// Addresses Offered
+static mut LEASE_POOL: [([u8; 4], [u8; 6]); 4] = [
+    ([192, 168, 10, 101], [0u8; 6]),
+    ([192, 168, 10, 102], [0u8; 6]),
+    ([192, 168, 10, 103], [0u8; 6]),
+    ([192, 168, 10, 104], [0u8; 6]),
 ];
 
 fn main(){
@@ -30,13 +39,13 @@ fn main(){
         println!("Received {len} byte(s) from {src:?}");
         let now = unsafe { core::arch::x86_64::_rdtsc()}; 
         let dhcp = DHCP::parse(&buf, len);
-        println!("Cycles: {}", unsafe{ core::arch::x86_64::_rdtsc() } - now);
+        println!("Cycles: {}", unsafe{ core::arch::x86_64::_rdtsc() - now } );
         
         if let Some(dhcp) = dhcp {
             if dhcp.op != 1 {
-                println!("DHCP OP is not 1, ignoring");
                 continue
             }
+            //println!("{dhcp:?}");
             let mut buf = [0u8; BUFFER_SIZE];
             match dhcp.msg_type {
                 // If request -> Lets acknowledge
@@ -47,7 +56,6 @@ fn main(){
                 // If Discover -> Do Something
                 Some(MessageType::Discover) => {
                     println!("Found DHCP Discover");
-                    println!("{dhcp:?}");
                     let len = dhcp.offer(&mut buf);
                     socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
                 }
@@ -77,7 +85,7 @@ struct DHCP<'a>{
     yiaddr: [u8; 4],
     siaddr: [u8; 4], 
     giaddr: [u8; 4], 
-    chaddr: [u8; 16],
+    chaddr: [u8; 6],
     sname: [u8; 64],
     file: [u8; 128],
     magic: [u8; 4],
@@ -101,7 +109,7 @@ impl<'a> DHCP<'a>{
         let mut yiaddr: [u8; 4] = [0; 4];
         let mut siaddr: [u8; 4] = [0; 4];
         let mut giaddr: [u8; 4] = [0; 4];
-        let mut chaddr: [u8; 16] = [0; 16];
+        let mut chaddr: [u8; 6] = [0; 6];
         let mut sname: [u8; 64] = [0; 64];
         let mut file: [u8; 128] = [0; 128];
         let mut magic: [u8; 4] = [0; 4];
@@ -118,7 +126,7 @@ impl<'a> DHCP<'a>{
         yiaddr.copy_from_slice(&payload[16..20]);
         siaddr.copy_from_slice(&payload[20..24]);
         giaddr.copy_from_slice(&payload[24..28]);
-        chaddr.copy_from_slice(&payload[28..44]);
+        chaddr.copy_from_slice(&payload[28..34]);
         sname.copy_from_slice(&payload[44..108]);
         file.copy_from_slice(&payload[108..236]);
         magic.copy_from_slice(&payload[236..240]);
@@ -262,77 +270,64 @@ impl<'a> DHCP<'a>{
     }
     /// Creates an ACK response based on a DHCP Request
     fn ack(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
-        buf[0] = 0x2; // op
-        buf[1] = 0x1; // hytpe
-        buf[2] = 0x6; // hlen
-        buf[3] = 0x0; // hops
-        buf[4..8].copy_from_slice(&self.xid); // Client ID
-        buf[8..10].copy_from_slice(&[0u8; 2]); // Seconds
-        buf[10..12].copy_from_slice(&[0u8; 2]); // Bootp flags
-        buf[12..16].copy_from_slice(&[0u8; 4]); // Client IP
-        buf[16..20].copy_from_slice(&LEASE_POOL[0]); // Requested IP
-        buf[20..24].copy_from_slice(&SERVER_IP); // Our Server IP
-        buf[24..28].copy_from_slice(&[0,0,0,0]);
-        buf[28..44].copy_from_slice(&self.chaddr); // Requester MAC
-        buf[44..108].copy_from_slice(&[0u8; 64]); // Unused
-        buf[108..236].copy_from_slice(&[0u8; 128]); // Unused
-        buf[236..240].copy_from_slice(&DHCP_MAGIC); // DHCP Magic bytes
 
-        let options: [&[u8]; 5] = [
-            &[53, 1, 5], // 
-            &[54, 4, 192, 168, 1, 67], // Address given
-            &[51, 4, 0x00, 0x01, 0x51, 0x80], // Lease Time
-            &[1, 4, 255, 255, 255, 0], // Subnet Mask
-            &[255], // End
+        // Set the basic defaults
+        self.baseline(buf);
+
+        let options: &[Options] = &[
+            Options::MessageType(MessageType::Ack),
+            Options::ServerIP(SERVER_IP),
+            Options::SubnetMask(SUBNET_MASK),
+            Options::LeaseTime(LEASE_TIME), // 1 day
+            Options::TftpServer(TFTP_ADDR),
+            Options::BootFile(TFTP_BOOT_FILE),
+            Options::End,
         ];
 
+        // Start at 240 (After the magic bytes)
         let mut option_ptr = 240;
-        // Generate Options
-        for option in options{
-            let opt_len = option.len();
-            buf[option_ptr .. option_ptr + opt_len].copy_from_slice(option);
-            option_ptr = option_ptr + opt_len;
+        // For every option we want
+        for opt in options {
+            // Allocate a buffer we can pass down to default evil rust!
+            let mut tmp_buf = [0u8; 100];
+            // Take the length so we can dynamically push on our option
+            let len = opt.serialise(&mut tmp_buf);
+            // Copy the option serialised into the UDP data
+            buf[option_ptr .. option_ptr + len].copy_from_slice(&tmp_buf[..len]);
+            // Increment the UDP data len
+            option_ptr = option_ptr + len;
         }
 
         option_ptr
     }
     /// Creates an Offer response based on a DHCP Discover
     fn offer(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
-        buf[0] = 0x2; // op
-        buf[1] = 0x1; // hytpe
-        buf[2] = 0x6; // hlen
-        buf[3] = 0x0; // hops
-        buf[4..8].copy_from_slice(&self.xid); // Client ID
-        buf[8..10].copy_from_slice(&[0u8; 2]); // Seconds
-        buf[10..12].copy_from_slice(&[0u8; 2]); // Bootp flags
-        buf[12..16].copy_from_slice(&[0u8; 4]); // Client IP
-        buf[16..20].copy_from_slice(&LEASE_POOL[0]); // Yiaddr
-        buf[20..24].copy_from_slice(&[0u8; 4]); // Our Server IP
-        buf[24..28].copy_from_slice(&[0u8; 4]); // Relay IP
-        buf[28..44].copy_from_slice(&self.chaddr); // Requester MAC
-        buf[44..108].copy_from_slice(&[0u8; 64]); // Unused
-        buf[108..236].copy_from_slice(&[0u8; 128]); // Unused
-        buf[236..240].copy_from_slice(&DHCP_MAGIC); // DHCP Magic bytes
-    
+
+        // Set the basic defaults
+        self.baseline(buf);
+        
         let options: &[Options] = if self.pxe_config.arch == ClientArch::Unknown {
             &[
                 Options::MessageType(MessageType::Offer),
-                Options::ServerIP([192,168,1,67]),
-                Options::SubnetMask([255,255,255,0]),
-                Options::LeaseTime(86400), // 1 day
+                Options::ServerIP(SERVER_IP),
+                Options::SubnetMask(SUBNET_MASK),
+                Options::LeaseTime(LEASE_TIME), // 1 day
+                Options::TftpServer(TFTP_ADDR),
+                Options::BootFile(TFTP_BOOT_FILE),
                 Options::End,
             ]
         }else{
             &[
                 Options::MessageType(MessageType::Offer),
-                Options::ServerIP([192,168,1,67]),
-                Options::SubnetMask([255,255,255,0]),
-                Options::LeaseTime(86400), // 1 day
-                Options::TftpServer("192.168.1.67"),
+                Options::ServerIP(SERVER_IP),
+                Options::SubnetMask(SUBNET_MASK),
+                Options::LeaseTime(LEASE_TIME), // 1 day
+                Options::TftpServer(TFTP_ADDR),
+                Options::BootFile(TFTP_BOOT_FILE),
+                Options::End,
                 // &[93, 2, 0, 0], // PXE Client Arch
                 // &[94, 3, 1, 2, 1], // PXE Version
                 // &[97, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // PXE Guid
-                Options::End,
             ]
         };
 
@@ -351,5 +346,41 @@ impl<'a> DHCP<'a>{
         }
 
         option_ptr
+    }
+    /// Manages our pool of IP addresses
+    fn get_addr_from_pool(&self) -> Option<[u8; 4]> {
+        for (ip, mac) in unsafe { &mut LEASE_POOL }{      
+            if *mac == self.chaddr{
+                return Some(*ip);
+            }
+        }
+        for (ip, mac) in unsafe { &mut LEASE_POOL }{      
+            if mac == &[0u8; 6]{
+                *mac = self.chaddr;
+                return Some(*ip);
+            }
+        }
+        // Could not find a valid IP
+        None
+    }
+
+    fn baseline(&self, buf: &mut [u8; BUFFER_SIZE]) {
+        let ip_offered = self.get_addr_from_pool().expect("No available IPs");
+
+        buf[0] = 0x2; // op
+        buf[1] = 0x1; // hytpe
+        buf[2] = 0x6; // hlen
+        buf[3] = 0x0; // hops
+        buf[4..8].copy_from_slice(&self.xid); // Client ID
+        buf[8..10].copy_from_slice(&[0u8; 2]); // Seconds
+        buf[10..12].copy_from_slice(&[0u8; 2]); // Bootp flags
+        buf[12..16].copy_from_slice(&[0u8; 4]); // Client IP
+        buf[16..20].copy_from_slice(&ip_offered); // Yiaddr
+        buf[20..24].copy_from_slice(&[0u8; 4]); // Our Server IP
+        buf[24..28].copy_from_slice(&[0u8; 4]); // Relay IP
+        buf[28..34].copy_from_slice(&self.chaddr); // Requester MAC
+        buf[44..108].copy_from_slice(&[0u8; 64]); // Unused
+        buf[108..236].copy_from_slice(&[0u8; 128]); // Unused
+        buf[236..240].copy_from_slice(&DHCP_MAGIC); // DHCP Magic bytes
     }
 }
