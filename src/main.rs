@@ -11,6 +11,8 @@ const BIND_ADDR: &str = "0.0.0.0:67";
 const BUFFER_SIZE: usize = 1500; 
 /// Our advertised IP Address in Packets (TODO: Fix this?)
 const SERVER_IP: [u8; 4] = [192, 168 ,1 ,67];
+/// TFTP Server
+const TFTP_ADDR: &str = "192.168.1.67";
 /// Addresses Offered
 const LEASE_POOL: [[u8; 4]; 1] = [
     [192, 168, 1, 101]
@@ -311,46 +313,42 @@ impl<'a> DHCP<'a>{
         buf[44..108].copy_from_slice(&[0u8; 64]); // Unused
         buf[108..236].copy_from_slice(&[0u8; 128]); // Unused
         buf[236..240].copy_from_slice(&DHCP_MAGIC); // DHCP Magic bytes
-
-        let options:&[&[u8]] = if self.pxe_config.arch == ClientArch::Unknown{
+    
+        let options: &[Options] = if self.pxe_config.arch == ClientArch::Unknown {
             &[
-                &[53, 1, 2], // Message Offer
-                &[54, 4, 192, 168, 1, 67], // Address given
-                &[51, 4, 0x00, 0x01, 0x51, 0x80], // Lease Time
-                &[1, 4, 255, 255, 255, 0], // Subnet Mask
-                &[255], // End
+                Options::MessageType(MessageType::Offer),
+                Options::ServerIP([192,168,1,67]),
+                Options::SubnetMask([255,255,255,0]),
+                Options::LeaseTime(86400), // 1 day
+                Options::End,
             ]
         }else{
             &[
-                &[53, 1, 2], // Message Offer
-                &[54, 4, 192, 168, 1, 67], // Address given
-                &[51, 4, 0x00, 0x01, 0x51, 0x80], // Lease Time
-                &[1, 4, 255, 255, 255, 0], // Subnet Mask
-                //&"\x41\x10helloworld".as_bytes(),
-                &[93, 2, 0, 0], // PXE Client Arch
-                &[94, 3, 1, 2, 1], // PXE Version
-                &[97, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // PXE Guid
-                &[255], // End
+                Options::MessageType(MessageType::Offer),
+                Options::ServerIP([192,168,1,67]),
+                Options::SubnetMask([255,255,255,0]),
+                Options::LeaseTime(86400), // 1 day
+                Options::TftpServer("192.168.1.67"),
+                // &[93, 2, 0, 0], // PXE Client Arch
+                // &[94, 3, 1, 2, 1], // PXE Version
+                // &[97, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // PXE Guid
+                Options::End,
             ]
         };
 
+        // Start at 240 (After the magic bytes)
         let mut option_ptr = 240;
-        // Generate Options
-        for option in options{
-            let opt_len = option.len();
-            buf[option_ptr .. option_ptr + opt_len].copy_from_slice(option);
-            option_ptr = option_ptr + opt_len;
+        // For every option we want
+        for opt in options {
+            // Allocate a buffer we can pass down to default evil rust!
+            let mut tmp_buf = [0u8; 100];
+            // Take the length so we can dynamically push on our option
+            let len = opt.serialise(&mut tmp_buf);
+            // Copy the option serialised into the UDP data
+            buf[option_ptr .. option_ptr + len].copy_from_slice(&tmp_buf[..len]);
+            // Increment the UDP data len
+            option_ptr = option_ptr + len;
         }
-
-        // if self.pxe_config.arch != ClientArch::Unknown {
-        //     let dhcp_options: [&[u8]; 5] = [
-        //         &[53, 1, 2], // 
-        //         &[54, 4, 192, 168, 1, 67], // Address given
-        //         &[51, 4, 0x00, 0x01, 0x51, 0x80], // Lease Time
-        //         &[1, 4, 255, 255, 255, 0], // Subnet Mask
-        //         &[255], // End
-        //     ];
-        // }
 
         option_ptr
     }

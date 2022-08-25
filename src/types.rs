@@ -54,12 +54,87 @@ impl From<u16> for ClientArch{
 
 #[derive(Clone, Copy, Debug)]
 pub enum Options<'a> {
-    MessageType(MessageType),
+    SubnetMask([u8; 4]),
+    LeaseTime(u32),       
+    MessageType(MessageType), 
+    ServerIP([u8;4]),     
+    TftpServer(&'a str), 
     ClientIdentifier(u8, [u8; 6]),
     ParameterRequestList([u8; 50]),
     MaxDhcpMessageSize(u16),
     RequestedIPAddr([u8; 4]),
-    HostName(&'a str)
+    HostName(&'a str),
+    End,
+}
+
+impl Options<'_>{
+    fn opcode(&self) -> u8{
+        match self {
+            Self::SubnetMask(_) => 1,
+            Self::HostName(_) => 12,
+            Self::RequestedIPAddr(_) => 50,
+            Self::LeaseTime(_) => 51,     
+            Self::MessageType(_) => 53, 
+            Self::ServerIP(_) => 54,        
+            Self::ParameterRequestList(_) => 55,
+            Self::MaxDhcpMessageSize(_) => 57,
+            Self::ClientIdentifier(_, _) => 61,
+            Self::TftpServer(_) => 66,      
+            Self::End => 255,
+        }
+    }
+} 
+
+
+impl Serialise for Options<'_>{
+    fn serialise(&self, tmp_buf: &mut [u8; 100]) -> usize {
+        tmp_buf[0] = self.opcode();
+        match self {
+            Self::MessageType(msg) => {
+                let len: usize = 3;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2] = *msg as u8;
+                len
+            },
+            Self::ServerIP(addr) => {
+                let len: usize = 6;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2..6].copy_from_slice(addr);
+                len
+            },
+            Self::TftpServer(addr) => {
+                let len: usize = addr.len() + 2;
+                tmp_buf[1] = addr.len() as u8;
+                tmp_buf[2..2+addr.len()].copy_from_slice(addr.as_bytes());
+                len
+            },
+            Self::LeaseTime(time) => {
+                let len: usize = 6;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2] = (time >> 24) as u8;
+                tmp_buf[3] = (time >> 16) as u8;
+                tmp_buf[4] = (time >> 8) as u8;
+                tmp_buf[5] = *time as u8;
+                len
+            },
+            Self::SubnetMask(addr) => {
+                let len: usize = 6;
+                tmp_buf[1] = len as u8 - 2;
+                tmp_buf[2..6].copy_from_slice(addr);
+                len
+            },
+            Self::ClientIdentifier(i, j) => {0},
+            Self::ParameterRequestList(e) => {0},
+            Self::MaxDhcpMessageSize(e) => {0},
+            Self::RequestedIPAddr(e) => {0},
+            Self::HostName(e) => {0},
+            Self::End => { 1 },
+        }
+    }
+}
+
+pub trait Serialise{
+    fn serialise(&self, tmp_buf: &mut [u8; 100]) -> usize;
 }
 
 #[derive(Clone, Copy, Debug)]
