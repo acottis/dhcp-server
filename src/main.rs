@@ -293,28 +293,14 @@ impl<'a> DHCP<'a>{
             Options::End,
         ];
 
-        // Start at 240 (After the magic bytes)
-        let mut option_ptr = 240;
-        // For every option we want
-        for opt in options {
-            // Allocate a buffer we can pass down to default evil rust!
-            let mut tmp_buf = [0u8; 100];
-            // Take the length so we can dynamically push on our option
-            let len = opt.serialise(&mut tmp_buf);
-            // Copy the option serialised into the UDP data
-            buf[option_ptr .. option_ptr + len].copy_from_slice(&tmp_buf[..len]);
-            // Increment the UDP data len
-            option_ptr = option_ptr + len;
-        }
-
-        option_ptr
+        // Returns the len of the UDP data
+        self.set_options(options, buf)
     }
     /// Creates an Offer response based on a DHCP Discover
     fn offer(&self, buf: &mut [u8;BUFFER_SIZE]) -> usize {
-
         // Set the basic defaults
         self.new(buf);
-        
+        // Our custom options
         let options: &[Options] = &[
             Options::MessageType(MessageType::Offer),
             Options::SubnetMask(SUBNET_MASK),
@@ -322,24 +308,11 @@ impl<'a> DHCP<'a>{
             Options::ServerIP(SERVER_IP),
             Options::End,
         ];
-
-        // Start at 240 (After the magic bytes)
-        let mut option_ptr = 240;
-        // For every option we want
-        for opt in options {
-            // Allocate a buffer we can pass down to default evil rust!
-            let mut tmp_buf = [0u8; 100];
-            // Take the length so we can dynamically push on our option
-            let len = opt.serialise(&mut tmp_buf);
-            // Copy the option serialised into the UDP data
-            buf[option_ptr .. option_ptr + len].copy_from_slice(&tmp_buf[..len]);
-            // Increment the UDP data len
-            option_ptr = option_ptr + len;
-        }
-
-        option_ptr
+        // Returns the len of the UDP data
+        self.set_options(options, buf)
     }
     /// Manages our pool of IP addresses
+    #[inline(always)]
     fn get_addr_from_pool(&self) -> Option<[u8; 4]> {
         for (ip, mac) in unsafe { &mut LEASE_POOL }{      
             if *mac == self.chaddr{
@@ -355,7 +328,27 @@ impl<'a> DHCP<'a>{
         // Could not find a valid IP
         None
     }
-
+    /// Generates options based on an &[options]
+    #[inline(always)]
+    fn set_options(&self, options: &[Options], buf: &mut [u8;1500]) -> usize {
+        // Start at 240 (After the magic bytes)
+        let mut option_ptr = 240;
+        // For every option we want
+        for opt in options {
+            // Allocate a buffer we can pass down to default evil rust!
+            let mut tmp_buf = [0u8; 100];
+            // Take the length so we can dynamically push on our option
+            let len = opt.serialise(&mut tmp_buf);
+            // Copy the option serialised into the UDP data
+            buf[option_ptr .. option_ptr + len].copy_from_slice(&tmp_buf[..len]);
+            // Increment the UDP data len
+            option_ptr = option_ptr + len;
+        }
+        // Final Len of the UDP packet
+        option_ptr
+    }
+    /// Sets up a UDP data buffer with our DHCP defaults before options applied
+    #[inline(always)]
     fn new(&self, buf: &mut [u8; BUFFER_SIZE]) {
         let ip_offered = self.get_addr_from_pool().expect("No available IPs");
 
