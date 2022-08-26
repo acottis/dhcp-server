@@ -141,27 +141,26 @@ impl<'a> DHCP<'a>{
         let mut options: [Option<Options>; 20] = [None; 20];
         let mut options_ptr = 240;
         loop {
-            // If the PTR exceeds the len of the UDP Data break
-            if options_ptr > packet_len { break }
-
             // End Option, break loop
             if payload[options_ptr] == 255 { break } 
             
             // Not enough space to have length in the option
             if options_ptr + 1 > packet_len { break }
-            // Bounds check on Options Len
 
+            // Get the next Options len
             let len = payload[options_ptr+1] as usize;
-            if len > packet_len - options_ptr {
-                println!("Option len is greater than packet");
-                return None 
-            }
-
+            let opt_start = options_ptr+2;
+            let opt_end = options_ptr+2+len;
+            let data = match payload.get(opt_start..opt_end){
+                Some(data) => data,
+                // Invalid Options Len
+                None => return None
+            };
             let res: Option<Options> = match &payload[options_ptr] {
                 // Host name
-                12 => {           
-                    if let Ok(hostname) = 
-                        core::str::from_utf8(&payload[options_ptr+2..options_ptr + 2 + len]){
+                12 => {         
+                    if let Ok(hostname) =
+                        core::str::from_utf8(data){
                         Some(Options::HostName(hostname))
                     }else{
                         return None
@@ -169,13 +168,15 @@ impl<'a> DHCP<'a>{
                 }
                 // Requested IP Address
                 50 => {
+                    if len < 1 { return None }
                     let mut ip_addr: [u8; 4] = [0u8; 4];
-                    ip_addr.copy_from_slice(&payload[options_ptr+2..options_ptr+6]);
+                    ip_addr.copy_from_slice(data);
                     Some(Options::RequestedIPAddr(ip_addr))
                 },
                 // DHCP Message Type
                 53 => { 
-                    if let Some(m_type) = payload[options_ptr+2].try_into().ok(){
+                    if len < 1 { return None }
+                    if let Ok(m_type) = data[0].try_into(){
                         msg_type = Some(m_type);
                         Some(Options::MessageType(m_type))
                     }else{
@@ -184,17 +185,18 @@ impl<'a> DHCP<'a>{
                 },
                 // DHCP Requested Parameters
                 55 =>{
+                    if len >= 50 { return None }
                     let mut params = [0u8; 50];
-                    for (i, param) in payload[options_ptr+2 .. options_ptr+2+len].iter().enumerate(){
+                    for (i, param) in data.iter().enumerate(){
                         params[i] = *param;
                     } 
                     Some(Options::ParameterRequestList(params))
                 },
                 // Maximum DHCP Message Size
                 57 => {
+                    if len < 2 { return None }
                     // Think this should only ever be 2 length
-                    if len != 2 { return None }
-                    let sz: u16 = (payload[options_ptr+2] as u16) << 8 | payload[options_ptr+3] as u16;
+                    let sz: u16 = (data[0] as u16) << 8 | data[1] as u16;
                     Some(Options::MaxDhcpMessageSize(sz))
                 },
                 // DHCP Server Identifier | Pfft we ignore this
@@ -203,36 +205,35 @@ impl<'a> DHCP<'a>{
                 60 => { None }
                 // Client Identifier (MAC)
                 61 => {
-                    let hardware_type = payload[options_ptr+2];
+                    if len < 7 { return None }
+                    let hardware_type = data[0];
                     let mut client_mac: [u8; 6] = [0u8;6];
-                    client_mac.copy_from_slice(&payload[options_ptr+3..options_ptr+9]);
-    
+                    client_mac.copy_from_slice(&data[1..]);
                     Some(Options::ClientIdentifier(hardware_type, client_mac))
                 },
                 // User Class Information, dont need https://www.rfc-editor.org/rfc/rfc3004
                 77 => { None }
                 // Client System Arch (For PXE)
                 93 => {
-                    // Client ID is 16 bytes out of 17 of length
-                    let arch_num: u16 = (payload[options_ptr+2] as u16) << 8 | payload[options_ptr+3] as u16; 
+                    if len < 2 { return None }
+                    let arch_num: u16 = (data[0] as u16) << 8 | data[1] as u16; 
                     pxe_config.arch = arch_num.into();
-
                     None
                 }   
                 // Client Identifier (For PXE)
                 94 => {
-                    // Client ID is 16 bytes out of 17 of length
+                    if len < 3 { return None }
                     pxe_config.version = (
-                        payload[options_ptr+2],
-                        payload[options_ptr+3],
-                        payload[options_ptr+4],
+                        data[0],
+                        data[1],
+                        data[2],
                     );
                     None
                 }   
                 // Client Identifier (For PXE)
                 97 => {
-                    // Client ID is 16 bytes out of 17 of length
-                    pxe_config.client_id.copy_from_slice(&payload[options_ptr+2..options_ptr+2+len-1]);
+                    if len < 17 { return None }
+                    pxe_config.client_id.copy_from_slice(&data[..data.len()-1]);
                     None
                 }
                 // Etherchannel, dont need this?
@@ -314,11 +315,13 @@ impl<'a> DHCP<'a>{
     /// Manages our pool of IP addresses
     #[inline(always)]
     fn get_addr_from_pool(&self) -> Option<[u8; 4]> {
+        // If we have already given it an address
         for (ip, mac) in unsafe { &mut LEASE_POOL }{      
             if *mac == self.chaddr{
                 return Some(*ip);
             }
         }
+        // Give it first empty if we did not already know about it
         for (ip, mac) in unsafe { &mut LEASE_POOL }{      
             if mac == &[0u8; 6]{
                 *mac = self.chaddr;
