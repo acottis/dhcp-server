@@ -28,18 +28,19 @@ static mut LEASE_POOL: [([u8; 4], [u8; 6]); 4] = [
 ];
 
 fn main(){
- 
+    env_logger::init();
+    log::info!("DHCP Server starting...");
+
     let socket = UdpSocket::bind(BIND_ADDR).expect("Cannot bind");
+    log::info!("Listening on {BIND_ADDR:?}");
     socket.set_broadcast(true).expect("Cannot set broadcast");
 
     loop {
         let mut buf = [0; BUFFER_SIZE];
 
         let (len, src) = socket.recv_from(&mut buf).unwrap();
-        println!("Received {len} byte(s) from {src:?}");
-        let now = unsafe { core::arch::x86_64::_rdtsc()}; 
+        log::info!("Received {len} byte(s) from {src:?}");
         let dhcp = DHCP::parse(&buf, len);
-        println!("Cycles: {}", unsafe{ core::arch::x86_64::_rdtsc() - now } );
         
         if let Some(dhcp) = dhcp {
             if dhcp.op != 1 {
@@ -52,19 +53,21 @@ fn main(){
                 Some(MessageType::Request) => {
                     let len = dhcp.ack(&mut buf);
                     socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
-                    println!("Found Request, Sending DHCP ack");
+                    log::info!("Found Request, Sending DHCP ack");
                 }
                 // If Discover -> Do Something
                 Some(MessageType::Discover) => {
                     let len = dhcp.offer(&mut buf);
                     socket.send_to(&buf[0..len], "255.255.255.255:68").unwrap();
-                    println!("Found Discover, Sending DHCP offer");
+                    log::info!("Found Discover, Sending DHCP offer");
                 }
                 // If Inform -> Do Something
                 Some(MessageType::Inform) => {
-                    todo!("Not implemented inform yet");
                 }
-                _ => {todo!("We dont handle this yet")}
+                _ => {
+                    log::info!("Unable to handle, not implemented: {:?}", dhcp.msg_type);
+                    continue;
+                }
             };
         }
     }    
@@ -235,13 +238,11 @@ impl<'a> DHCP<'a>{
                     if len < 17 { return None }
                     pxe_config.client_id.copy_from_slice(&data[..data.len()-1]);
                     None
-                }
-                // Etherchannel, dont need this?
-                175 => { None }
-                unknown => { 
-                    println!("We do not handle option {unknown}");
-                    None
                 },
+                opt=> {
+                    log::info!("We dont handle Option {opt}");
+                    None
+                }
             };
             // Add the parsed option
             if res.is_some(){
